@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+Versions are `YEAR.MONTH.N`, where N is the release number within the month.
+
+## 2026.10.1
 
 First version, ported from the varipro-modbus-mqtt bridge 2.0.
 
