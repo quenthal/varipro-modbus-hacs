@@ -223,3 +223,10 @@ async def test_diagnostics_redacts_host(hass: HomeAssistant, bus) -> None:
     diag = await async_get_config_entry_diagnostics(hass, entry)
     assert diag["entry"]["data"][CONF_HOST] == "**REDACTED**"
     assert diag["device"]["mode_raw"] == vd.MODE_NORMAL
+
+
+async def test_brand_icon_bundled(hass: HomeAssistant) -> None:
+    from homeassistant.loader import async_get_integration
+
+    integration = await async_get_integration(hass, DOMAIN)
+    assert integration.has_branding
