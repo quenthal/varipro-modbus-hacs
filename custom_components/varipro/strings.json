@@ -1,0 +1,102 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "VariPro room controller",
+        "description": "The controller is reached through an RS-485 to Modbus TCP gateway.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "slave": "Modbus address"
+        },
+        "data_description": {
+          "host": "IP address or host name of the Modbus TCP gateway.",
+          "port": "Modbus TCP port of the gateway, usually 502.",
+          "slave": "Modbus address of the room controller (controller settings, Modbus menu)."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "The controller did not answer. Check the gateway address, port and Modbus address.",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "This controller is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Temperature limits",
+        "data": {
+          "min_temp": "Minimum target temperature",
+          "max_temp": "Maximum target temperature"
+        }
+      }
+    },
+    "error": {
+      "min_above_max": "The minimum must be lower than the maximum."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "alarm_condensation": { "name": "Condensation alarm" },
+      "alarm_fan1_rpm": { "name": "Fan 1 speed missing" },
+      "alarm_fan2_rpm": { "name": "Fan 2 speed missing" },
+      "alarm_sensor_water_in": { "name": "Supply water sensor fault" },
+      "alarm_sensor_water_out": { "name": "Return water sensor fault" },
+      "alarm_parameter_file": { "name": "Parameter file alarm" },
+      "alarm_filter": { "name": "Filter cleaning" }
+    },
+    "number": {
+      "away_deadzone": { "name": "Away dead zone" }
+    },
+    "sensor": {
+      "room_temperature": { "name": "Room temperature" },
+      "setpoint_active": { "name": "Active setpoint" },
+      "target_home": { "name": "Target temperature home" },
+      "target_away": { "name": "Target temperature away" },
+      "water_in": { "name": "Supply water temperature" },
+      "water_out": { "name": "Return water temperature" },
+      "fan_speed": { "name": "Fan speed" },
+      "cooling_output": { "name": "Cooling output" },
+      "heating_output": { "name": "Heating output" },
+      "app_state": {
+        "name": "Application state",
+        "state": {
+          "init": "Initializing",
+          "standby": "Standby",
+          "normal": "Normal",
+          "away": "Away",
+          "flush": "Flush",
+          "stopped": "Stopped",
+          "test": "Test mode",
+          "unknown": "Unknown"
+        }
+      },
+      "fan_actual": {
+        "name": "Fan control",
+        "state": {
+          "off": "Off",
+          "low": "Low",
+          "medium": "Medium",
+          "high": "High",
+          "auto": "Auto",
+          "unknown": "Unknown"
+        }
+      },
+      "alarm_raw": { "name": "Alarm register" }
+    }
+  },
+  "exceptions": {
+    "cannot_connect": {
+      "message": "The VariPro controller did not answer: {error}"
+    },
+    "write_failed": {
+      "message": "Writing to the VariPro controller failed: {error}"
+    },
+    "not_in_fan_only": {
+      "message": "Not possible in the current mode (fan only): {error}"
+    }
+  }
+}

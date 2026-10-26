@@ -1,0 +1,13 @@
+{
+  "domain": "varipro",
+  "name": "VariPro",
+  "codeowners": ["@quenthal"],
+  "config_flow": true,
+  "documentation": "https://github.com/quenthal/varipro-modbus-hacs",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/quenthal/varipro-modbus-hacs/issues",
+  "loggers": ["pymodbus"],
+  "requirements": ["pymodbus>=3.10,<4"],
+  "version": "0.1.0"
+}

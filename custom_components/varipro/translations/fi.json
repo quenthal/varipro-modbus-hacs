@@ -1,0 +1,102 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "VariPro-huonesäädin",
+        "description": "Säädin liitetään RS-485 → Modbus TCP -yhdyskäytävän kautta.",
+        "data": {
+          "host": "Osoite",
+          "port": "Portti",
+          "slave": "Modbus-osoite"
+        },
+        "data_description": {
+          "host": "Modbus TCP -yhdyskäytävän IP-osoite tai nimi.",
+          "port": "Yhdyskäytävän Modbus TCP -portti, yleensä 502.",
+          "slave": "Huonesäätimen Modbus-osoite (säätimen asetukset, Modbus-valikko)."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Säädin ei vastannut. Tarkista yhdyskäytävän osoite, portti ja Modbus-osoite.",
+      "unknown": "Odottamaton virhe"
+    },
+    "abort": {
+      "already_configured": "Tämä säädin on jo lisätty."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Lämpötilarajat",
+        "data": {
+          "min_temp": "Pienin tavoitelämpötila",
+          "max_temp": "Suurin tavoitelämpötila"
+        }
+      }
+    },
+    "error": {
+      "min_above_max": "Pienimmän arvon on oltava suurinta pienempi."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "alarm_condensation": { "name": "Kondenssihälytys" },
+      "alarm_fan1_rpm": { "name": "Puhallin 1, kierrosluku puuttuu" },
+      "alarm_fan2_rpm": { "name": "Puhallin 2, kierrosluku puuttuu" },
+      "alarm_sensor_water_in": { "name": "Anturivika, tulovesi" },
+      "alarm_sensor_water_out": { "name": "Anturivika, paluuvesi" },
+      "alarm_parameter_file": { "name": "Parametritiedosto" },
+      "alarm_filter": { "name": "Suodattimen puhdistus" }
+    },
+    "number": {
+      "away_deadzone": { "name": "Poissa-tilan kuollut alue" }
+    },
+    "sensor": {
+      "room_temperature": { "name": "Huonelämpötila" },
+      "setpoint_active": { "name": "Aktiivinen asetusarvo" },
+      "target_home": { "name": "Tavoitelämpötila, kotona" },
+      "target_away": { "name": "Tavoitelämpötila, poissa" },
+      "water_in": { "name": "Tuloveden lämpötila" },
+      "water_out": { "name": "Paluuveden lämpötila" },
+      "fan_speed": { "name": "Puhaltimen nopeus" },
+      "cooling_output": { "name": "Jäähdytysteho" },
+      "heating_output": { "name": "Lämmitysteho" },
+      "app_state": {
+        "name": "Sovellustila",
+        "state": {
+          "init": "Alustus",
+          "standby": "Valmiustila",
+          "normal": "Normaali",
+          "away": "Poissa",
+          "flush": "Huuhtelu",
+          "stopped": "Pysähtynyt",
+          "test": "Testitila",
+          "unknown": "Tuntematon"
+        }
+      },
+      "fan_actual": {
+        "name": "Puhaltimen säätö",
+        "state": {
+          "off": "Pois",
+          "low": "Matala",
+          "medium": "Keskitaso",
+          "high": "Korkea",
+          "auto": "Auto",
+          "unknown": "Tuntematon"
+        }
+      },
+      "alarm_raw": { "name": "Hälytysrekisteri" }
+    }
+  },
+  "exceptions": {
+    "cannot_connect": {
+      "message": "VariPro-säädin ei vastannut: {error}"
+    },
+    "write_failed": {
+      "message": "Kirjoitus VariPro-säätimeen epäonnistui: {error}"
+    },
+    "not_in_fan_only": {
+      "message": "Ei mahdollista nykyisessä tilassa (tuuletus): {error}"
+    }
+  }
+}

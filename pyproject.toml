@@ -1,0 +1,21 @@
+# Development tooling only; the integration itself is custom_components/varipro.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 110
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "UP", "ASYNC", "RUF"]
+ignore = ["E501", "RUF012"]  # RUF012: HA _attr_* class attributes
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["RUF059"]
+
+[tool.ruff.lint.isort]
+force-sort-within-sections = true
+known-first-party = ["custom_components"]
+combine-as-imports = true
