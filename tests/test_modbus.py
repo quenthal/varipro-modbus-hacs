@@ -66,3 +66,37 @@ async def test_requests_are_spaced(server) -> None:
         assert loop.time() - start >= 0.6  # 3 gaps of 200 ms
     finally:
         bus.close()
+
+
+async def test_gateway_restart_leaves_one_connection() -> None:
+    """After the gateway restarts, only our own reconnect may open a connection.
+
+    pymodbus' background reconnect used to open a second one alongside it,
+    which a gateway accepting only a few connections may not tolerate.
+    """
+    port = _free_port()
+
+    async def start():
+        device = SimDevice(id=1, simdata=[SimData(0, values=[2] * 10, datatype=DataType.REGISTERS)])
+        srv = ModbusTcpServer(device, address=("127.0.0.1", port))
+        task = asyncio.create_task(srv.serve_forever())
+        await asyncio.sleep(0.2)
+        return srv, task
+
+    srv, task = await start()
+    bus = VariProModbus("127.0.0.1", port, 1, timeout=1)
+    try:
+        assert await bus.read("holding", 0, 1) == [2]
+        await srv.shutdown()
+        task.cancel()
+        await asyncio.sleep(0.2)
+        assert await bus.read("holding", 0, 1) is None  # gateway away
+
+        srv, task = await start()
+        assert await bus.read("holding", 0, 1) == [2]  # recovers on the next poll
+        await asyncio.sleep(1.0)  # a background reconnect would have fired by now
+        assert len(srv.active_connections) == 1
+    finally:
+        bus.close()
+        await srv.shutdown()
+        task.cancel()

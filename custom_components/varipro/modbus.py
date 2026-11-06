@@ -28,7 +28,10 @@ class VariProModbus:
         timeout: float = DEFAULT_TIMEOUT,
         min_gap: float = MIN_GAP,
     ) -> None:
-        self._client = AsyncModbusTcpClient(host, port=port, timeout=timeout, retries=1)
+        # reconnect_delay=0: no pymodbus background reconnect. _request reconnects
+        # itself; both together left a second TCP connection open on the gateway
+        # after an outage (gateways such as the EW11 accept only a few).
+        self._client = AsyncModbusTcpClient(host, port=port, timeout=timeout, retries=1, reconnect_delay=0)
         self._device_id = device_id
         self._min_gap = min_gap
         self._lock = asyncio.Lock()

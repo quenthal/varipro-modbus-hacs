@@ -51,7 +51,8 @@ class VariProClimate(VariProEntity, ClimateEntity):
     _attr_hvac_modes = list(HVAC_MODE_MAP.values())
     _attr_preset_modes = [PRESET_HOME, PRESET_AWAY]
     _attr_fan_modes = [FAN_AUTO, FAN_LOW, FAN_MEDIUM, FAN_HIGH]
-    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    _attr_native_temperature_unit = UnitOfTemperature.CELSIUS
+    _attr_temperature_unit = UnitOfTemperature.CELSIUS  # HA < 2026.11
     _attr_precision = PRECISION_TENTHS
     _attr_target_temperature_step = 0.5
     _attr_supported_features = (
@@ -81,13 +82,19 @@ class VariProClimate(VariProEntity, ClimateEntity):
 
     @property
     @override
-    def current_temperature(self) -> float | None:
+    def native_current_temperature(self) -> float | None:
         return self.device.room_temp
 
     @property
     @override
-    def target_temperature(self) -> float | None:
+    def native_target_temperature(self) -> float | None:
         return self.device.target_temperature
+
+    # Home Assistant < 2026.11 reads these names. 2026.11+ uses the native_*
+    # members and, because this class provides them, does not warn about these.
+    # Remove when hacs.json requires 2026.11.
+    current_temperature = native_current_temperature
+    target_temperature = native_target_temperature
 
     @property
     @override
