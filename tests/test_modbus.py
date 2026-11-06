@@ -100,3 +100,31 @@ async def test_gateway_restart_leaves_one_connection() -> None:
         bus.close()
         await srv.shutdown()
         task.cancel()
+
+
+async def test_missing_responses_keep_connection_until_pymodbus_drops_it() -> None:
+    """A gateway that stops answering (e.g. WiFi drop) keeps the same TCP
+    connection for a few requests instead of a new one per timeout."""
+    accepted = 0
+
+    async def silent(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal accepted
+        accepted += 1
+        while await reader.read(256):
+            pass  # never answer
+        writer.close()
+
+    server = await asyncio.start_server(silent, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    bus = VariProModbus("127.0.0.1", port, 1, timeout=0.2, min_gap=0)
+    try:
+        for _ in range(3):
+            assert await bus.read("holding", 0, 1) is None
+        assert accepted == 1  # same connection reused across timeouts
+        for _ in range(4):
+            await bus.read("holding", 0, 1)
+        assert accepted == 2  # pymodbus gave up on the silent connection once
+    finally:
+        bus.close()
+        server.close()
+        await server.wait_closed()

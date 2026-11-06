@@ -11,7 +11,7 @@ import asyncio
 import time
 
 from pymodbus.client import AsyncModbusTcpClient
-from pymodbus.exceptions import ModbusException
+from pymodbus.exceptions import ModbusException, ModbusIOException
 
 MIN_GAP = 0.2
 DEFAULT_TIMEOUT = 5.0
@@ -48,6 +48,13 @@ class VariProModbus:
                     self.last_error = "connection failed"
                     return None
                 result = await func(*args, device_id=self._device_id, **kwargs)
+            except ModbusIOException as err:
+                # No response: keep the TCP connection. It survives a short WiFi
+                # drop, whereas closing it here would leave a dead session on a
+                # gateway that never saw the close. pymodbus drops the connection
+                # itself after repeated missing responses (retries + 3).
+                self.last_error = str(err) or type(err).__name__
+                return None
             except (ModbusException, OSError, TimeoutError) as err:
                 self.last_error = str(err) or type(err).__name__
                 self._client.close()  # the next request reconnects
