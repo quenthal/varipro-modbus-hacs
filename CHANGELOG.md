@@ -12,6 +12,9 @@ Versions are `YEAR.MONTH.N`, where N is the release number within the month.
   connection now survives a short WiFi drop of the gateway; previously each
   timeout abandoned a session the gateway still held. pymodbus closes the
   connection itself after repeated missing responses.
+- Fixed: when the gateway accepts a connection and closes it at once (its
+  connection slots are full), the poll fails immediately with a clear log
+  message instead of waiting for the response timeout.
 - Fixed: Home Assistant 2026.11 deprecation warnings for the climate entity
   (`native_temperature_unit`, `native_current_temperature`,
   `native_target_temperature`). Older Home Assistant versions keep working.

@@ -128,3 +128,25 @@ async def test_missing_responses_keep_connection_until_pymodbus_drops_it() -> No
         bus.close()
         server.close()
         await server.wait_closed()
+
+
+async def test_gateway_closing_at_once_fails_fast() -> None:
+    """A gateway that accepts and immediately closes (slots full) is reported
+    right away instead of waiting for the response timeout."""
+
+    async def reject(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.close()
+
+    server = await asyncio.start_server(reject, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    bus = VariProModbus("127.0.0.1", port, 1, timeout=3, min_gap=0)
+    try:
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        assert await bus.read("holding", 0, 1) is None
+        assert loop.time() - start < 1.5
+        assert "closed by the gateway" in bus.last_error
+    finally:
+        bus.close()
+        server.close()
+        await server.wait_closed()

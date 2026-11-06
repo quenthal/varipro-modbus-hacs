@@ -44,9 +44,15 @@ class VariProModbus:
             if delay > 0:
                 await asyncio.sleep(delay)
             try:
-                if not self._client.connected and not await self._client.connect():
-                    self.last_error = "connection failed"
-                    return None
+                if not self._client.connected:
+                    if not await self._client.connect():
+                        self.last_error = "connection failed"
+                        return None
+                    if not self._client.connected:
+                        # Accepted and closed at once: typically a gateway whose
+                        # connection slots are taken (e.g. by dead sessions)
+                        self.last_error = "connection closed by the gateway right after connecting"
+                        return None
                 result = await func(*args, device_id=self._device_id, **kwargs)
             except ModbusIOException as err:
                 # No response: keep the TCP connection. It survives a short WiFi
