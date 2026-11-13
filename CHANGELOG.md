@@ -2,7 +2,7 @@
 
 Versions are `YEAR.MONTH.N`, where N is the release number within the month.
 
-## Unreleased
+## 2026.11.2
 
 - Fixed: the main registers (mode, targets, temperatures, outputs) were read
   only every 20 seconds instead of every 10: Home Assistant starts a refresh
