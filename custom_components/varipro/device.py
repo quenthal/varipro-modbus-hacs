@@ -10,6 +10,7 @@ Addresses are 0-based (holding 4x00001 = 0, input 3x00001 = 0).
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -56,6 +57,11 @@ DEFAULT_DEADZONE_RAW = 20  # 2.0 °C, if the real value has not been read yet
 DEADZONE_MAX = 15.0
 WRITE_GUARD_S = 15  # a differing read this soon after a write is treated as stale
 FAIL_LIMIT = 3  # consecutive read failures before the device is reported unavailable
+# A group is due this much before its interval has passed: the caller's refresh
+# cycle starts slightly less than a full interval after the previous read
+# (Home Assistant schedules from whole seconds), which would otherwise skip
+# every other cycle.
+POLL_SLACK_S = 1.0
 
 
 def scale10(raw: int) -> float:
@@ -149,6 +155,10 @@ class VariProDevice:
         self.fan_only_snapshot: dict[str, Any] | None = None
         # (snapshot, restore application mode) - state still to be written back to the device
         self.pending_restore: tuple[dict[str, Any], bool] | None = None
+
+        # Polls and commands run as whole operations, never interleaved: each
+        # public coroutine holds this lock (the bus only serialises single requests)
+        self._lock = asyncio.Lock()
 
         self.write_guard: dict[int, tuple[int, float]] = {}
         self.last_poll: dict[str, float] = {}
@@ -309,29 +319,40 @@ class VariProDevice:
         fan only simply continues (e.g. across a Home Assistant restart).
         Otherwise the pre-fan-only state is restored.
         """
-        snapshot = await self.store.load()
-        if not snapshot:
-            return
-        mode = await self.bus.read("holding", REG_MODE, 1)
-        deadzone = await self.bus.read("holding", REG_DEADZONE, 1)
-        if mode is None or deadzone is None:
-            raise VariProConnectionError(self.bus.last_error or "no response")
-        if mode[0] == MODE_AWAY and deadzone[0] == FANONLY_DEADZONE_RAW:
-            _LOGGER.info("Continuing fan only (snapshot %s)", snapshot)
-            self.fan_only_active = True
-            self.fan_only_snapshot = snapshot
-            self.deadzone_raw = snapshot.get("deadzone_raw", DEFAULT_DEADZONE_RAW)
-        else:
-            _LOGGER.warning("Fan-only snapshot found but device has left fan only - restoring")
-            self.pending_restore = (snapshot, True)
+        async with self._lock:
+            snapshot = await self.store.load()
+            if not snapshot:
+                return
+            if snapshot.get("restoring"):
+                # Leaving fan only was not finished by the previous run; the device
+                # may still look like fan only, but it must not continue
+                _LOGGER.warning("Unfinished fan-only restore found - restoring")
+                self.pending_restore = (snapshot, bool(snapshot.get("restore_mode")))
+                return
+            mode = await self.bus.read("holding", REG_MODE, 1)
+            deadzone = await self.bus.read("holding", REG_DEADZONE, 1)
+            if mode is None or deadzone is None:
+                raise VariProConnectionError(self.bus.last_error or "no response")
+            if mode[0] == MODE_AWAY and deadzone[0] == FANONLY_DEADZONE_RAW:
+                _LOGGER.info("Continuing fan only (snapshot %s)", snapshot)
+                self.fan_only_active = True
+                self.fan_only_snapshot = snapshot
+                self.deadzone_raw = snapshot.get("deadzone_raw", DEFAULT_DEADZONE_RAW)
+            else:
+                _LOGGER.warning("Fan-only snapshot found but device has left fan only - restoring")
+                self.pending_restore = (snapshot, True)
 
     async def async_refresh(self) -> None:
         """Poll the register groups that are due. Raises VariProConnectionError
         when the device has not answered FAIL_LIMIT times in a row or has
         never been read."""
+        async with self._lock:
+            await self._refresh()
+
+    async def _refresh(self) -> None:
         for group in self.groups:
             last = self.last_poll.get(group.name)
-            if last is not None and self.clock() - last < group.interval:
+            if last is not None and self.clock() - last < group.interval - POLL_SLACK_S:
                 continue
             registers = await self.bus.read(group.kind, group.start, group.count)
             if registers is None:
@@ -421,6 +442,14 @@ class VariProDevice:
             return mode_raw
         return MODE_AWAY if snapshot.get("preset") == "away" else MODE_NORMAL
 
+    async def _set_pending_restore(self, snapshot: dict[str, Any], write_mode: bool) -> None:
+        """Remember a restore that is retried on later polls. The stored snapshot
+        is marked, so that a restart finishes the restore instead of taking a
+        device still in away + 15 °C for active fan only."""
+        snapshot = {**snapshot, "restoring": True, "restore_mode": write_mode}
+        self.pending_restore = (snapshot, write_mode)
+        await self.store.save(snapshot)
+
     async def _enter_fan_only(self) -> None:
         """Away mode + 15 °C dead zone + manual fan speed. Partial failures are rolled back."""
         if self.mode_raw is None or self.pending_restore is not None:
@@ -443,13 +472,20 @@ class VariProDevice:
             if await self._write(REG_DEADZONE, deadzone_raw):
                 await self.store.clear()
             else:
-                self.pending_restore = (snapshot, False)  # snapshot kept: retried later
+                await self._set_pending_restore(snapshot, False)  # retried later
             raise VariProWriteError(f"mode: {self.bus.last_error}")
         self.mode_raw = MODE_AWAY
         self.deadzone_device = scale10(FANONLY_DEADZONE_RAW)
 
         # Manual fan speed if auto/off (auto would stop the fan without cooling demand)
-        if snapshot["fan"] in ("auto", "off") and await self._write(REG_FAN, FAN_TO_RAW["medium"]):
+        if snapshot["fan"] in ("auto", "off"):
+            if not await self._write(REG_FAN, FAN_TO_RAW["medium"]):
+                error = self.bus.last_error
+                if await self._restore_snapshot(snapshot, True):
+                    await self.store.clear()
+                else:
+                    await self._set_pending_restore(snapshot, True)
+                raise VariProWriteError(f"fan: {error}")
             self.fan = "medium"
 
         self.fan_only_active = True
@@ -488,8 +524,8 @@ class VariProDevice:
                 ok = False
         return ok
 
-    async def _exit_fan_only(self, write_mode: bool = True) -> str:
-        """Leave fan only; returns the pre-fan-only preset. write_mode=False
+    async def _exit_fan_only(self, write_mode: bool = True) -> dict[str, Any]:
+        """Leave fan only; returns the pre-fan-only snapshot. write_mode=False
         when the mode already changed elsewhere or the caller writes it."""
         snapshot = self.fan_only_snapshot or await self.store.load() or {}
         self.fan_only_active = False
@@ -498,9 +534,25 @@ class VariProDevice:
             await self.store.clear()
         else:
             _LOGGER.error("Fan-only restore incomplete - will retry")
-            self.pending_restore = (snapshot, write_mode)
+            await self._set_pending_restore(snapshot, write_mode)
         _LOGGER.info("Fan only off (preset before: %s)", snapshot.get("preset", "home"))
-        return snapshot.get("preset", "home")
+        return snapshot
+
+    async def _write_mode(self, value: int, left_fan_only: dict[str, Any] | None = None) -> None:
+        """Write the application mode. left_fan_only is the snapshot when fan
+        only was just left: the device is then still in away mode, and if the
+        write fails the requested mode is written once the device answers again."""
+        if await self._write(REG_MODE, value):
+            self.mode_raw = value
+            if self.pending_restore is not None and self.pending_restore[1]:
+                # The mode chosen now wins over the one an unfinished restore would write
+                await self._set_pending_restore(self.pending_restore[0], False)
+            return
+        error = self.bus.last_error
+        if left_fan_only is not None and value != MODE_AWAY:
+            snapshot = self.pending_restore[0] if self.pending_restore else left_fan_only
+            await self._set_pending_restore({**snapshot, "mode_raw": value}, True)
+        raise VariProWriteError(f"register {REG_MODE}: {error}")
 
     async def _retry_pending_restore(self) -> None:
         assert self.pending_restore is not None
@@ -511,11 +563,13 @@ class VariProDevice:
             await self.store.clear()
 
     async def async_restore_normal(self) -> None:
-        """Leave fan only and restore the previous state (integration removed)."""
-        if self.fan_only_active:
-            await self._exit_fan_only(write_mode=True)
-        elif self.pending_restore is not None:
-            await self._retry_pending_restore()
+        """Leave fan only and restore the previous state (integration removed).
+        pending_restore is still set afterwards if the device did not accept it."""
+        async with self._lock:
+            if self.fan_only_active:
+                await self._exit_fan_only(write_mode=True)
+            elif self.pending_restore is not None:
+                await self._retry_pending_restore()
 
     # ------------------------------------------------------------------
     # Commands
@@ -524,68 +578,72 @@ class VariProDevice:
     async def async_set_hvac_mode(self, mode: str) -> None:
         if mode not in HVAC_MODES:
             raise ValueError(f"unknown hvac mode {mode}")
-        if mode == "fan_only":
-            if not self.fan_only_active:
-                await self._enter_fan_only()
-            return
+        async with self._lock:
+            if mode == "fan_only":
+                if not self.fan_only_active:
+                    await self._enter_fan_only()
+                return
 
-        restored_preset = None
-        if self.fan_only_active:
-            restored_preset = await self._exit_fan_only(write_mode=False)
+            snapshot = None
+            if self.fan_only_active:
+                snapshot = await self._exit_fan_only(write_mode=False)
+            restored_preset = None if snapshot is None else snapshot.get("preset", "home")
 
-        if mode == "off":
-            value = MODE_OFF
-        elif restored_preset == "away" or (restored_preset is None and self.mode_raw == MODE_AWAY):
-            value = MODE_AWAY  # cool keeps away cooling (also when returning from fan only)
-        else:
-            value = MODE_NORMAL
-        await self._write_or_raise(REG_MODE, value)
-        self.mode_raw = value
+            if mode == "off":
+                value = MODE_OFF
+            elif restored_preset == "away" or (restored_preset is None and self.mode_raw == MODE_AWAY):
+                value = MODE_AWAY  # cool keeps away cooling (also when returning from fan only)
+            else:
+                value = MODE_NORMAL
+            await self._write_mode(value, snapshot)
 
     async def async_set_fan_mode(self, fan: str) -> None:
         # 'off' is not offered: the device does not keep 0 (returns to auto),
         # and it would equal turning the whole unit off.
         if fan not in FAN_MODES:
             raise ValueError(f"unknown fan mode {fan}")
-        if self.fan_only_active and fan == "auto":
-            raise VariProStateError("fan auto would stop the fan in fan only")
-        await self._write_or_raise(REG_FAN, FAN_TO_RAW[fan])
-        self.fan = fan
+        async with self._lock:
+            if self.fan_only_active and fan == "auto":
+                raise VariProStateError("fan auto would stop the fan in fan only")
+            await self._write_or_raise(REG_FAN, FAN_TO_RAW[fan])
+            self.fan = fan
 
     async def async_set_temperature(self, value: float) -> None:
-        if self.fan_only_active:
-            raise VariProStateError("no target temperature in fan only")
         if not self.min_temp <= value <= self.max_temp:
             raise ValueError(f"temperature {value} outside {self.min_temp}-{self.max_temp}")
         raw = to_raw10(value)
-        if self.preset == "away":
-            await self._write_or_raise(REG_TARGET_AWAY, raw)
-            self.target_away = scale10(raw)
-        else:
-            await self._write_or_raise(REG_TARGET_HOME, raw)
-            self.target_home = scale10(raw)
+        async with self._lock:
+            if self.fan_only_active:
+                raise VariProStateError("no target temperature in fan only")
+            if self.preset == "away":
+                await self._write_or_raise(REG_TARGET_AWAY, raw)
+                self.target_away = scale10(raw)
+            else:
+                await self._write_or_raise(REG_TARGET_HOME, raw)
+                self.target_home = scale10(raw)
 
     async def async_set_preset(self, preset: str) -> None:
         if preset not in PRESETS:
             raise ValueError(f"unknown preset {preset}")
-        # Selecting a preset during fan only = back to cooling
-        if self.fan_only_active:
-            await self._exit_fan_only(write_mode=False)
-        if self.mode_raw == MODE_OFF:
-            _LOGGER.info("Preset %s requested while off - the unit turns on", preset)
-        value = MODE_AWAY if preset == "away" else MODE_NORMAL
-        await self._write_or_raise(REG_MODE, value)
-        self.mode_raw = value
+        async with self._lock:
+            # Selecting a preset during fan only = back to cooling
+            snapshot = None
+            if self.fan_only_active:
+                snapshot = await self._exit_fan_only(write_mode=False)
+            if self.mode_raw == MODE_OFF:
+                _LOGGER.info("Preset %s requested while off - the unit turns on", preset)
+            await self._write_mode(MODE_AWAY if preset == "away" else MODE_NORMAL, snapshot)
 
     async def async_set_deadzone(self, value: float) -> None:
-        if self.fan_only_active:
-            raise VariProStateError("dead zone is used by fan only")
         if not 0 <= value <= DEADZONE_MAX:
             raise ValueError(f"dead zone {value} outside 0-{DEADZONE_MAX}")
         raw = to_raw10(value)
-        await self._write_or_raise(REG_DEADZONE, raw)
-        self.deadzone_raw = raw
-        self.deadzone_device = scale10(raw)
+        async with self._lock:
+            if self.fan_only_active:
+                raise VariProStateError("dead zone is used by fan only")
+            await self._write_or_raise(REG_DEADZONE, raw)
+            self.deadzone_raw = raw
+            self.deadzone_device = scale10(raw)
 
     def as_dict(self) -> dict[str, Any]:
         """State for diagnostics."""

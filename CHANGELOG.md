@@ -2,6 +2,24 @@
 
 Versions are `YEAR.MONTH.N`, where N is the release number within the month.
 
+## Unreleased
+
+- Fixed: the main registers (mode, targets, temperatures, outputs) were read
+  only every 20 seconds instead of every 10: Home Assistant starts a refresh
+  slightly less than 10 seconds after the previous read, so every other
+  refresh skipped them.
+- Fixed: commands and polls now run one at a time as whole operations. Two
+  simultaneous commands (for example fan only and the away dead zone from one
+  script) could leave fan only active with the wrong dead zone.
+- Fixed: leaving fan only while the controller does not answer no longer
+  leaves it in away mode. The requested mode is written when the controller
+  answers again, also across a Home Assistant restart (previously a restart
+  could continue fan only).
+- Fixed: fan only is rolled back and an error is shown if the manual fan speed
+  cannot be written; before, it reported success with the fan left on auto.
+- Fixed: removing the integration keeps the fan-only snapshot if the
+  controller could not be restored, and logs the values to restore.
+
 ## 2026.11.1
 
 - Fixed: after a network or gateway outage the integration could keep a second

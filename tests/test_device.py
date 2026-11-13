@@ -1,5 +1,7 @@
 """Device logic tests (no Home Assistant needed)."""
 
+import asyncio
+
 import pytest
 
 from custom_components.varipro import device as vd
@@ -176,6 +178,60 @@ async def test_deadzone_out_of_range(env, value):
         await dev.async_set_deadzone(value)
 
 
+async def test_groups_due_slightly_before_their_interval(env):
+    """Home Assistant starts a cycle a little under 10 s after the previous read."""
+    dev, bus, store, clock = env
+    reads = []
+    orig = bus.read
+
+    async def read(kind, start, count):
+        reads.append((kind, start))
+        return await orig(kind, start, count)
+
+    bus.read = read
+    await dev.async_refresh()
+    assert len(reads) == len(dev.groups)
+    reads.clear()
+    clock.now += 9.6
+    await dev.async_refresh()
+    assert reads == [("holding", 0), ("input", 3)]
+    reads.clear()
+    clock.now += 5
+    await dev.async_refresh()
+    assert reads == []
+
+
+class YieldingBus(FakeBus):
+    """Lets other tasks run during every request, like a real bus."""
+
+    async def read(self, kind, start, count):
+        await asyncio.sleep(0)
+        return await super().read(kind, start, count)
+
+    async def write(self, addr, value):
+        await asyncio.sleep(0)
+        return await super().write(addr, value)
+
+
+async def test_commands_and_polls_do_not_interleave():
+    bus, store, clock = YieldingBus(), FakeStore(), Clock()
+    dev = vd.VariProDevice(bus, store, clock=clock)
+    await poll(dev, clock)
+    dev.last_poll.clear()
+    results = await asyncio.gather(
+        dev.async_set_hvac_mode("fan_only"),
+        dev.async_set_deadzone(3.5),
+        dev.async_refresh(),
+        return_exceptions=True,
+    )
+    assert isinstance(results[1], vd.VariProStateError)  # ran after fan only was complete
+    assert results[2] is None
+    assert dev.fan_only_active
+    assert bus.holding[201] == vd.FANONLY_DEADZONE_RAW
+    assert dev.deadzone_raw == 20
+    assert store.data["deadzone_raw"] == 20
+
+
 # --- Fan only ---
 
 
@@ -288,6 +344,68 @@ async def test_failed_exit_retried(env):
     assert dev.deadzone_raw == 20
 
 
+async def test_exit_during_outage_finishes_with_requested_mode(env):
+    dev, bus, store, clock = env
+    await poll(dev, clock)
+    await dev.async_set_hvac_mode("fan_only")
+    bus.offline = True
+    with pytest.raises(vd.VariProWriteError):
+        await dev.async_set_hvac_mode("cool")
+    assert not dev.fan_only_active
+    assert bus.holding[0] == vd.MODE_AWAY  # nothing reached the device
+    bus.offline = False
+    await poll(dev, clock)
+    assert bus.holding[0] == vd.MODE_NORMAL  # not left in away
+    assert bus.holding[201] == 20
+    assert bus.holding[2] == vd.FAN_TO_RAW["auto"]
+    assert dev.preset == "home"
+    assert dev.pending_restore is None
+    assert store.data is None
+
+
+async def test_exit_to_off_during_outage_turns_off_later(env):
+    dev, bus, store, clock = env
+    await poll(dev, clock)
+    await dev.async_set_hvac_mode("fan_only")
+    bus.offline = True
+    with pytest.raises(vd.VariProWriteError):
+        await dev.async_set_hvac_mode("off")
+    bus.offline = False
+    await poll(dev, clock)
+    assert bus.holding[0] == vd.MODE_OFF
+    assert bus.holding[201] == 20
+
+
+async def test_mode_chosen_during_pending_restore_wins(env):
+    dev, bus, store, clock = env
+    await poll(dev, clock)
+    await dev.async_set_hvac_mode("fan_only")
+    bus.fail_writes.update({vd.REG_MODE, vd.REG_DEADZONE})
+    with pytest.raises(vd.VariProWriteError):
+        await dev.async_set_hvac_mode("cool")
+    bus.fail_writes.discard(vd.REG_MODE)
+    await dev.async_set_preset("away")
+    bus.fail_writes.clear()
+    await poll(dev, clock)
+    assert bus.holding[0] == vd.MODE_AWAY  # the later choice, not the pending "cool"
+    assert bus.holding[201] == 20
+    assert store.data is None
+
+
+async def test_fan_only_rolls_back_when_fan_write_fails(env):
+    """Fan auto would stop the fan: fan only must not report success."""
+    dev, bus, store, clock = env
+    await poll(dev, clock)
+    bus.fail_writes.add(vd.REG_FAN)
+    with pytest.raises(vd.VariProWriteError):
+        await dev.async_set_hvac_mode("fan_only")
+    assert not dev.fan_only_active
+    assert bus.holding[0] == vd.MODE_NORMAL
+    assert bus.holding[201] == 20
+    assert dev.hvac_mode == "cool"
+    assert store.data is None
+
+
 # --- Restart behaviour ---
 
 
@@ -337,3 +455,32 @@ async def test_restore_normal_on_removal(env):
     assert bus.holding[0] == vd.MODE_OFF  # exactly the previous state
     assert bus.holding[201] == 20
     assert store.data is None
+
+
+async def test_restart_finishes_unfinished_exit(env):
+    """Device still in away + 15 °C after a failed exit: not taken for fan only."""
+    dev, bus, store, clock = env
+    await poll(dev, clock)
+    await dev.async_set_hvac_mode("fan_only")
+    bus.offline = True
+    with pytest.raises(vd.VariProWriteError):
+        await dev.async_set_hvac_mode("cool")
+    bus.offline = False
+    dev2 = vd.VariProDevice(bus, store, clock=clock)
+    await dev2.async_initialize()
+    await poll(dev2, clock)
+    assert not dev2.fan_only_active
+    assert bus.holding[0] == vd.MODE_NORMAL
+    assert bus.holding[201] == 20
+    assert bus.holding[2] == vd.FAN_TO_RAW["auto"]
+    assert store.data is None
+
+
+async def test_restore_normal_reports_incomplete_restore(env):
+    dev, bus, store, clock = env
+    await poll(dev, clock)
+    await dev.async_set_hvac_mode("fan_only")
+    bus.offline = True
+    await dev.async_restore_normal()
+    assert dev.pending_restore is not None
+    assert store.data is not None

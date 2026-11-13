@@ -17,7 +17,7 @@ from .const import (
     DOMAIN,
 )
 from .coordinator import SnapshotStore, VariProConfigEntry, VariProCoordinator
-from .device import VariProConnectionError, VariProDevice
+from .device import DEFAULT_DEADZONE_RAW, VariProConnectionError, VariProDevice, scale10
 from .modbus import VariProModbus
 
 _LOGGER = logging.getLogger(__name__)
@@ -69,15 +69,33 @@ async def async_unload_entry(hass: HomeAssistant, entry: VariProConfigEntry) -> 
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: VariProConfigEntry) -> None:
-    """Integration removed: end fan only on the device and drop the snapshot."""
+    """Integration removed: end fan only on the device and drop the snapshot.
+
+    The snapshot is kept if the device could not be restored, and the values
+    it should have are logged.
+    """
     device = _create_device(hass, entry)
     try:
         snapshot = await device.store.load()
-        if snapshot:
+        if not snapshot:
+            return
+        try:
             await device.async_initialize()
             await device.async_restore_normal()
+        except VariProConnectionError:
+            restored = False
+        else:
+            restored = device.pending_restore is None
+        if restored:
             await device.store.clear()
-    except VariProConnectionError:
-        _LOGGER.warning("Could not restore the pre-fan-only state: device not reachable")
+        else:
+            _LOGGER.warning(
+                "Could not restore the pre-fan-only state: the controller did not answer. "
+                "It may still be in away mode with a 15 °C dead zone. To fix, add the "
+                "integration again and set: away dead zone %.1f °C, fan %s, preset %s",
+                scale10(snapshot.get("deadzone_raw", DEFAULT_DEADZONE_RAW)),
+                snapshot.get("fan", "auto"),
+                snapshot.get("preset", "home"),
+            )
     finally:
         device.bus.close()

@@ -210,6 +210,18 @@ async def test_remove_entry_restores_fan_only(hass: HomeAssistant, bus) -> None:
     assert bus.holding[vd.REG_FAN] == vd.FAN_TO_RAW["auto"]
 
 
+async def test_remove_entry_keeps_snapshot_when_restore_fails(
+    hass: HomeAssistant, bus, hass_storage, caplog: pytest.LogCaptureFixture
+) -> None:
+    entry = await _setup(hass)
+    await _climate(hass, "set_hvac_mode", hvac_mode=HVACMode.FAN_ONLY)
+    bus.offline = True
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    assert f"{DOMAIN}.{entry.entry_id}.fan_only" in hass_storage
+    assert "away dead zone 2.0 °C, fan auto, preset home" in caplog.text
+
+
 async def test_unload_closes_connection(hass: HomeAssistant, bus) -> None:
     entry = await _setup(hass)
     assert await hass.config_entries.async_unload(entry.entry_id)
