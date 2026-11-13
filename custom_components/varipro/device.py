@@ -450,6 +450,22 @@ class VariProDevice:
         self.pending_restore = (snapshot, write_mode)
         await self.store.save(snapshot)
 
+    async def _finish_restore(self, snapshot: dict[str, Any], write_mode: bool) -> bool:
+        """Write the snapshot back; what the device did not accept stays pending."""
+        rest = await self._restore_snapshot(snapshot, write_mode)
+        if rest is None:
+            self.pending_restore = None
+            await self.store.clear()
+            return True
+        await self._set_pending_restore(*rest)
+        return False
+
+    async def _supersede_pending(self, **values: Any) -> None:
+        """A value set now wins over the one an unfinished restore would write."""
+        if self.pending_restore is not None:
+            snapshot, write_mode = self.pending_restore
+            await self._set_pending_restore({**snapshot, **values}, write_mode)
+
     async def _enter_fan_only(self) -> None:
         """Away mode + 15 °C dead zone + manual fan speed. Partial failures are rolled back."""
         if self.mode_raw is None or self.pending_restore is not None:
@@ -481,10 +497,7 @@ class VariProDevice:
         if snapshot["fan"] in ("auto", "off"):
             if not await self._write(REG_FAN, FAN_TO_RAW["medium"]):
                 error = self.bus.last_error
-                if await self._restore_snapshot(snapshot, True):
-                    await self.store.clear()
-                else:
-                    await self._set_pending_restore(snapshot, True)
+                await self._finish_restore(snapshot, True)
                 raise VariProWriteError(f"fan: {error}")
             self.fan = "medium"
 
@@ -492,11 +505,16 @@ class VariProDevice:
         self.fan_only_snapshot = snapshot
         _LOGGER.info("Fan only on (snapshot %s)", snapshot)
 
-    async def _restore_snapshot(self, snapshot: dict[str, Any], write_mode: bool) -> bool:
+    async def _restore_snapshot(
+        self, snapshot: dict[str, Any], write_mode: bool
+    ) -> tuple[dict[str, Any], bool] | None:
         """Write the snapshot back. write_mode also restores the application
         mode, but only if the device is still in away mode (a change made on
-        the panel is not undone). True if everything succeeded."""
+        the panel is not undone). Returns None if everything succeeded, else
+        the (snapshot, write_mode) still to do: the mode and the fan are not
+        written again once done, so a later panel choice is kept."""
         ok = True
+        rest = dict(snapshot)
         deadzone_raw = snapshot.get("deadzone_raw", DEFAULT_DEADZONE_RAW)
         if await self._write(REG_DEADZONE, deadzone_raw):
             self.deadzone_raw = deadzone_raw
@@ -514,15 +532,21 @@ class VariProDevice:
                     ok = False
                 else:
                     self.mode_raw = mode_raw
+                    write_mode = False
+            else:
+                write_mode = False
 
         # Fan only is a bubble: the forced medium and fan changes during fan only are undone
         orig_fan = snapshot.get("fan")
         if orig_fan in FAN_TO_RAW and orig_fan != self.fan:
             if await self._write(REG_FAN, FAN_TO_RAW[orig_fan]):
                 self.fan = orig_fan
+                rest.pop("fan")
             else:
                 ok = False
-        return ok
+        else:
+            rest.pop("fan", None)
+        return None if ok else (rest, write_mode)
 
     async def _exit_fan_only(self, write_mode: bool = True) -> dict[str, Any]:
         """Leave fan only; returns the pre-fan-only snapshot. write_mode=False
@@ -530,11 +554,8 @@ class VariProDevice:
         snapshot = self.fan_only_snapshot or await self.store.load() or {}
         self.fan_only_active = False
         self.fan_only_snapshot = None
-        if await self._restore_snapshot(snapshot, write_mode):
-            await self.store.clear()
-        else:
+        if not await self._finish_restore(snapshot, write_mode):
             _LOGGER.error("Fan-only restore incomplete - will retry")
-            await self._set_pending_restore(snapshot, write_mode)
         _LOGGER.info("Fan only off (preset before: %s)", snapshot.get("preset", "home"))
         return snapshot
 
@@ -549,18 +570,18 @@ class VariProDevice:
                 await self._set_pending_restore(self.pending_restore[0], False)
             return
         error = self.bus.last_error
-        if left_fan_only is not None and value != MODE_AWAY:
-            snapshot = self.pending_restore[0] if self.pending_restore else left_fan_only
-            await self._set_pending_restore({**snapshot, "mode_raw": value}, True)
+        if self.pending_restore is not None:
+            # The newest request replaces the mode the unfinished restore would write
+            await self._set_pending_restore({**self.pending_restore[0], "mode_raw": value}, True)
+        elif left_fan_only is not None and value != MODE_AWAY:
+            await self._set_pending_restore({**left_fan_only, "mode_raw": value}, True)
         raise VariProWriteError(f"register {REG_MODE}: {error}")
 
     async def _retry_pending_restore(self) -> None:
         assert self.pending_restore is not None
         snapshot, write_mode = self.pending_restore
-        if await self._restore_snapshot(snapshot, write_mode):
+        if await self._finish_restore(snapshot, write_mode):
             _LOGGER.info("Fan-only snapshot restored to the device")
-            self.pending_restore = None
-            await self.store.clear()
 
     async def async_restore_normal(self) -> None:
         """Leave fan only and restore the previous state (integration removed).
@@ -607,6 +628,7 @@ class VariProDevice:
                 raise VariProStateError("fan auto would stop the fan in fan only")
             await self._write_or_raise(REG_FAN, FAN_TO_RAW[fan])
             self.fan = fan
+            await self._supersede_pending(fan=fan)
 
     async def async_set_temperature(self, value: float) -> None:
         if not self.min_temp <= value <= self.max_temp:
@@ -644,6 +666,7 @@ class VariProDevice:
             await self._write_or_raise(REG_DEADZONE, raw)
             self.deadzone_raw = raw
             self.deadzone_device = scale10(raw)
+            await self._supersede_pending(deadzone_raw=raw)
 
     def as_dict(self) -> dict[str, Any]:
         """State for diagnostics."""

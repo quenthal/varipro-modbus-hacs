@@ -392,6 +392,59 @@ async def test_mode_chosen_during_pending_restore_wins(env):
     assert store.data is None
 
 
+async def test_newest_failed_mode_request_is_the_one_finished(env):
+    dev, bus, store, clock = env
+    await poll(dev, clock)
+    await dev.async_set_hvac_mode("fan_only")
+    bus.offline = True
+    with pytest.raises(vd.VariProWriteError):
+        await dev.async_set_hvac_mode("cool")
+    with pytest.raises(vd.VariProWriteError):
+        await dev.async_set_hvac_mode("off")
+    bus.offline = False
+    await poll(dev, clock)
+    assert bus.holding[0] == vd.MODE_OFF
+
+
+async def test_partial_retry_does_not_undo_later_panel_choice(env):
+    dev, bus, store, clock = env
+    await poll(dev, clock)
+    await dev.async_set_hvac_mode("fan_only")
+    bus.offline = True
+    with pytest.raises(vd.VariProWriteError):
+        await dev.async_set_hvac_mode("off")
+    bus.offline = False
+    bus.fail_writes.add(vd.REG_DEADZONE)
+    await poll(dev, clock)  # off and the fan are written, the dead zone is not
+    assert bus.holding[0] == vd.MODE_OFF
+    assert bus.holding[2] == vd.FAN_TO_RAW["auto"]
+    bus.holding.update({0: vd.MODE_AWAY, 2: vd.FAN_TO_RAW["high"]})  # chosen on the panel
+    bus.fail_writes.clear()
+    clock.now += vd.WRITE_GUARD_S
+    await poll(dev, clock)
+    assert bus.holding[0] == vd.MODE_AWAY
+    assert bus.holding[2] == vd.FAN_TO_RAW["high"]
+    assert bus.holding[201] == 20
+    assert store.data is None
+
+
+async def test_settings_made_during_pending_restore_are_kept(env):
+    dev, bus, store, clock = env
+    await poll(dev, clock)
+    await dev.async_set_hvac_mode("fan_only")
+    bus.fail_writes.add(vd.REG_DEADZONE)
+    await dev.async_set_hvac_mode("cool")
+    assert dev.pending_restore is not None
+    bus.fail_writes.clear()
+    await dev.async_set_fan_mode("high")
+    await dev.async_set_deadzone(3.5)
+    await poll(dev, clock)
+    assert bus.holding[2] == vd.FAN_TO_RAW["high"]
+    assert bus.holding[201] == 35
+    assert dev.deadzone_raw == 35
+    assert store.data is None
+
+
 async def test_fan_only_rolls_back_when_fan_write_fails(env):
     """Fan auto would stop the fan: fan only must not report success."""
     dev, bus, store, clock = env
